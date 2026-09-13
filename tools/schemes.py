@@ -42,6 +42,35 @@ def _public_scheme(scheme: dict) -> dict:
     }
 
 
+def _find_scheme(schemes: list[dict], identifier: str) -> dict | None:
+    """Find a scheme by ID or by an unambiguous name fragment."""
+    if not isinstance(identifier, str) or not identifier.strip():
+        return None
+
+    requested = identifier.strip().casefold()
+    exact_id = next(
+        (scheme for scheme in schemes
+         if str(scheme.get("scheme_id", "")).casefold() == requested),
+        None,
+    )
+    if exact_id:
+        return exact_id
+
+    exact_name = next(
+        (scheme for scheme in schemes
+         if str(scheme.get("name", "")).casefold() == requested),
+        None,
+    )
+    if exact_name:
+        return exact_name
+
+    name_matches = [
+        scheme for scheme in schemes
+        if requested in str(scheme.get("name", "")).casefold()
+    ]
+    return name_matches[0] if len(name_matches) == 1 else None
+
+
 @tool
 def search_schemes(category: str | None = None, location: str | None = None) -> str:
     """Search the JSON-backed government scheme knowledge source."""
@@ -80,12 +109,12 @@ def check_scheme_eligibility(scheme_id: str, user_data: dict) -> str:
     schemes, error = _load_schemes()
     if error:
         return json.dumps({"error": error})
-    scheme = next((item for item in schemes if item.get("scheme_id") == scheme_id), None)
+    scheme = _find_scheme(schemes, scheme_id)
     if not scheme:
         return json.dumps({"error": f"Scheme {scheme_id} not found."})
 
     return json.dumps({
-        "scheme_id": scheme_id,
+        "scheme_id": scheme.get("scheme_id"),
         "scheme_name": scheme.get("name"),
         "preliminary_status": "MORE_INFORMATION_NEEDED",
         "provided_information": user_data,
@@ -102,7 +131,7 @@ def get_scheme_details(scheme_id: str) -> str:
     schemes, error = _load_schemes()
     if error:
         return json.dumps({"error": error})
-    scheme = next((item for item in schemes if item.get("scheme_id") == scheme_id), None)
+    scheme = _find_scheme(schemes, scheme_id)
     if not scheme:
         return json.dumps({"error": f"Scheme {scheme_id} not found."})
 

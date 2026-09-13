@@ -1,6 +1,6 @@
 import json
 from strands import tool
-from data.store import save_complaint
+from data.store import MOCK_COMPLAINTS_DB, save_complaint
 
 def _identify_department(issue: str, location: str) -> str:
     """Internal function to identify the department."""
@@ -41,6 +41,38 @@ def create_civic_complaint(
         location: Location where the issue occurred.
         description: Detailed description of the issue.
     """
+
+    issue = issue.strip() if isinstance(issue, str) else ""
+    location = location.strip() if isinstance(location, str) else ""
+    description = description.strip() if isinstance(description, str) else ""
+
+    missing_fields = [
+        field_name
+        for field_name, value in (
+            ("issue", issue),
+            ("location", location),
+            ("description", description),
+        )
+        if not value
+    ]
+    if missing_fields:
+        return json.dumps({
+            "error": "Cannot create a complaint because required information is missing.",
+            "missing_fields": missing_fields,
+            "status": "INVALID_INPUT",
+        }, indent=2)
+
+    for complaint in MOCK_COMPLAINTS_DB.values():
+        if (
+            complaint.get("issue", "").casefold() == issue.casefold()
+            and complaint.get("location", "").casefold() == location.casefold()
+            and complaint.get("description", "").casefold() == description.casefold()
+        ):
+            return json.dumps({
+                "message": "An identical complaint already exists.",
+                "complaint_id": complaint.get("complaint_id"),
+                "status": "DUPLICATE",
+            }, indent=2)
     
     # Use our internal logic to get the department
     department = _identify_department(issue, location)

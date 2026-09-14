@@ -1,11 +1,18 @@
 import logging
+import json
+import os
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
+from dotenv import load_dotenv
 import streamlit as st
-
-from agents.jan_sahayak import create_agent
 
 
 LOGGER = logging.getLogger(__name__)
+load_dotenv()
+
+API_URL_ENV_VAR = "PM_KISAN_API_URL"
+REQUEST_TIMEOUT_SECONDS = 30
 
 QUICK_ACTIONS = {
     "Report Civic Issue": "I want to report a civic issue.",
@@ -16,27 +23,51 @@ QUICK_ACTIONS = {
 
 
 def _initialize_session() -> None:
-    if "agent" not in st.session_state:
-        try:
-            st.session_state.agent = create_agent()
-        except Exception as error:
-            LOGGER.warning("Agent initialization failed: %s", type(error).__name__)
-            st.session_state.agent = None
     if "messages" not in st.session_state:
         st.session_state.messages = []
     if "pending_prompt" not in st.session_state:
         st.session_state.pending_prompt = None
+    if "processing" not in st.session_state:
+        st.session_state.processing = False
+
+
+def _request_answer(question: str) -> str:
+    api_url = os.getenv(API_URL_ENV_VAR)
+    if not api_url:
+        raise RuntimeError(f"{API_URL_ENV_VAR} is not configured")
+
+    request = Request(
+        api_url,
+        data=json.dumps({"question": question}).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+            if response.status != 200:
+                raise RuntimeError(f"API returned status {response.status}")
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        raise RuntimeError(f"API returned status {error.code}") from error
+    except (URLError, TimeoutError, json.JSONDecodeError) as error:
+        raise RuntimeError("API request failed") from error
+
+    answer = payload.get("answer") if isinstance(payload, dict) else None
+    if not isinstance(answer, str) or not answer.strip():
+        raise RuntimeError("API response did not contain an answer")
+    return answer
 
 
 def _run_agent_turn(prompt: str) -> None:
+    if not prompt or not prompt.strip():
+        return
+
     st.session_state.messages.append({"role": "user", "content": prompt})
     try:
-        if st.session_state.agent is None:
-            raise RuntimeError("Agent is unavailable")
-        response = st.session_state.agent(prompt)
-        response_text = str(response)
+        response_text = _request_answer(prompt.strip())
     except Exception as error:
-        LOGGER.warning("Agent request failed: %s", type(error).__name__)
+        LOGGER.warning("Chatbot request failed: %s", type(error).__name__)
         response_text = (
             "I couldn't process that request right now. "
             "Please try again later."
@@ -79,10 +110,18 @@ def main() -> None:
 
     pending_prompt = st.session_state.pending_prompt
     st.session_state.pending_prompt = None
-    typed_prompt = st.chat_input("Describe your question or civic issue")
+    typed_prompt = st.chat_input(
+        "Describe your question or civic issue",
+        disabled=st.session_state.processing,
+    )
     prompt = typed_prompt or pending_prompt
     if prompt:
-        _run_agent_turn(prompt)
+        st.session_state.processing = True
+        try:
+            with st.spinner("Getting assistance..."):
+                _run_agent_turn(prompt)
+        finally:
+            st.session_state.processing = False
 
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):

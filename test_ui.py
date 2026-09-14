@@ -1,25 +1,22 @@
-from types import SimpleNamespace
-
 import ui.app as ui_app
 
 
 class FakeSessionState:
     def __init__(self):
         self.messages = []
-        self.agent = None
+        self.processing = False
 
 
-def test_ui_keeps_agent_context_and_message_history(monkeypatch):
+def test_ui_sends_questions_and_keeps_message_history(monkeypatch):
     calls = []
 
-    class FakeAgent:
-        def __call__(self, prompt):
-            calls.append(prompt)
-            return f"response for: {prompt}"
+    def fake_request_answer(prompt):
+        calls.append(prompt)
+        return f"response for: {prompt}"
 
     session = FakeSessionState()
-    session.agent = FakeAgent()
     monkeypatch.setattr(ui_app.st, "session_state", session)
+    monkeypatch.setattr(ui_app, "_request_answer", fake_request_answer)
 
     ui_app._run_agent_turn("first message")
     ui_app._run_agent_turn("second message")
@@ -34,14 +31,13 @@ def test_ui_keeps_agent_context_and_message_history(monkeypatch):
     assert session.messages[-1]["content"] == "response for: second message"
 
 
-def test_ui_hides_agent_errors(monkeypatch):
-    class FailingAgent:
-        def __call__(self, prompt):
-            raise RuntimeError("secret internal failure")
+def test_ui_hides_api_errors(monkeypatch):
+    def failing_request_answer(prompt):
+        raise RuntimeError("secret internal failure")
 
     session = FakeSessionState()
-    session.agent = FailingAgent()
     monkeypatch.setattr(ui_app.st, "session_state", session)
+    monkeypatch.setattr(ui_app, "_request_answer", failing_request_answer)
 
     ui_app._run_agent_turn("test request")
 
@@ -50,6 +46,101 @@ def test_ui_hides_agent_errors(monkeypatch):
         "I couldn't process that request right now. Please try again later."
     )
     assert "secret internal failure" not in response
+
+
+def test_ui_does_not_send_empty_messages(monkeypatch):
+    session = FakeSessionState()
+    monkeypatch.setattr(ui_app.st, "session_state", session)
+    request_called = False
+
+    def fake_request_answer(prompt):
+        nonlocal request_called
+        request_called = True
+        return "unexpected response"
+
+    monkeypatch.setattr(ui_app, "_request_answer", fake_request_answer)
+
+    ui_app._run_agent_turn("   ")
+
+    assert session.messages == []
+    assert request_called is False
+
+
+def test_request_answer_posts_json_and_returns_answer(monkeypatch):
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'{"answer":"PM-Kisan provides farmer income support."}'
+
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setenv("PM_KISAN_API_URL", "https://example.test/PMKisanChatbot")
+    monkeypatch.setattr(ui_app, "urlopen", fake_urlopen)
+
+    answer = ui_app._request_answer("What is PM-Kisan?")
+
+    assert answer == "PM-Kisan provides farmer income support."
+    assert captured["request"].method == "POST"
+    assert captured["request"].get_header("Content-type") == "application/json"
+    assert captured["request"].data == b'{"question": "What is PM-Kisan?"}'
+    assert captured["timeout"] == ui_app.REQUEST_TIMEOUT_SECONDS
+
+
+def test_request_answer_rejects_missing_answer(monkeypatch):
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'{"message":"no answer"}'
+
+    monkeypatch.setenv("PM_KISAN_API_URL", "https://example.test/PMKisanChatbot")
+    monkeypatch.setattr(ui_app, "urlopen", lambda request, timeout: FakeResponse())
+
+    try:
+        ui_app._request_answer("What is PM-Kisan?")
+    except RuntimeError as error:
+        assert str(error) == "API response did not contain an answer"
+    else:
+        raise AssertionError("Expected missing answer to fail")
+
+
+def test_request_answer_rejects_non_success_status(monkeypatch):
+    class FakeResponse:
+        status = 503
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setenv("PM_KISAN_API_URL", "https://example.test/PMKisanChatbot")
+    monkeypatch.setattr(ui_app, "urlopen", lambda request, timeout: FakeResponse())
+
+    try:
+        ui_app._request_answer("What is PM-Kisan?")
+    except RuntimeError as error:
+        assert str(error) == "API returned status 503"
+    else:
+        raise AssertionError("Expected non-success status to fail")
 
 
 def test_ui_defines_required_quick_actions():
